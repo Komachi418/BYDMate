@@ -42,6 +42,11 @@ jobs:
           --tests '*N9BatteryReaderTest'
           --tests '*N9BatteryHistoryTest'
           --tests '*N9BatteryActivityTest'
+          --tests '*N9TelemetryReaderTest'
+          --tests '*N9RecordingStoreTest'
+          --tests '*N9BatteryDashboardTest'
+          --tests '*N9MonitorSettingsTest'
+          --tests '*N9MonitorServiceTest'
           --stacktrace
       - name: Build unsigned APK for retained local signing key
         run: ./gradlew :app:assembleN9Test -Pn9UnsignedForLocalSigning --stacktrace
@@ -59,17 +64,21 @@ jobs:
           root = ET.parse('n9-manifest.xml').getroot()
           name = '{http://schemas.android.com/apk/res/android}name'
           assert root.get('package') == 'com.bydmate.app.n9test2'
-          assert root.get('{http://schemas.android.com/apk/res/android}versionCode') == '505'
-          assert root.get('{http://schemas.android.com/apk/res/android}versionName') == '3.19.9-n9-battery1'
+          assert root.get('{http://schemas.android.com/apk/res/android}versionCode') == '506'
+          assert root.get('{http://schemas.android.com/apk/res/android}versionName') == '3.19.9-n9-battery2'
           app = root.find('application')
           assert app.get(name) == 'android.app.Application'
           assert app.get('{http://schemas.android.com/apk/res/android}label') == 'BYDMate N9 电池'
-          assert [x.get(name) for x in app.findall('activity')] == ['com.bydmate.app.n9.N9DiagnosticsActivity']
-          assert [x.get(name) for x in app.findall('receiver')] == ['com.bydmate.app.helper.HelperBinderReceiver']
-          assert not app.findall('service') and not app.findall('provider') and not app.findall('activity-alias')
+          assert {x.get(name) for x in app.findall('activity')} == {'com.bydmate.app.n9.N9BatteryActivity', 'com.bydmate.app.n9.N9DiagnosticsActivity'}
+          assert {x.get(name) for x in app.findall('receiver')} == {'com.bydmate.app.helper.HelperBinderReceiver', 'com.bydmate.app.n9.N9MonitorReceiver'}
+          assert [x.get(name) for x in app.findall('service')] == ['com.bydmate.app.n9.N9MonitorService']
+          assert not app.findall('provider') and not app.findall('activity-alias')
+          for component in app:
+            if component.get(name) in ('com.bydmate.app.n9.N9MonitorService', 'com.bydmate.app.n9.N9MonitorReceiver', 'com.bydmate.app.n9.N9DiagnosticsActivity'):
+              assert component.get('{http://schemas.android.com/apk/res/android}exported') == 'false'
           permissions = {x.get(name) for x in root.findall('uses-permission')}
-          assert not permissions.intersection({'android.permission.WRITE_SECURE_SETTINGS', 'android.permission.RECEIVE_BOOT_COMPLETED', 'android.permission.SYSTEM_ALERT_WINDOW', 'android.permission.REQUEST_INSTALL_PACKAGES'})
-          print('PASS: unsigned APK identity and diagnostic-only components; local signing required')
+          assert permissions == {'android.permission.INTERNET', 'android.permission.ACCESS_NETWORK_STATE', 'android.permission.FOREGROUND_SERVICE', 'android.permission.POST_NOTIFICATIONS', 'android.permission.RECEIVE_BOOT_COMPLETED', 'com.bydmate.app.n9test2.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION'}
+          print('PASS: unsigned APK identity and isolated battery-only components; local signing required')
           PY
       - name: Package notices and checksums
         run: |
@@ -96,4 +105,11 @@ jobs:
           path: |
             app/build/reports/tests/testN9TestUnitTest/
             app/build/test-results/testN9TestUnitTest/
+          retention-days: 14
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: N9-battery-preview-${{ github.sha }}
+          path: app/build/outputs/n9-preview/
+          if-no-files-found: warn
           retention-days: 14
