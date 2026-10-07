@@ -20,9 +20,10 @@ class N9VariantManifestTest {
                 PackageManager.GET_SERVICES or PackageManager.GET_PROVIDERS or
                 PackageManager.GET_PERMISSIONS)
         assertEquals("com.bydmate.app.n9test2", BuildConfig.APPLICATION_ID)
-        assertEquals(504, BuildConfig.VERSION_CODE)
-        assertEquals(504L, info.longVersionCode)
-        assertEquals("BYDMate N9 Test 2", app.applicationInfo.loadLabel(app.packageManager))
+        assertEquals(505, BuildConfig.VERSION_CODE)
+        assertEquals(505L, info.longVersionCode)
+        assertEquals("3.19.9-n9-battery1", BuildConfig.VERSION_NAME)
+        assertEquals("BYDMate N9 电池", app.applicationInfo.loadLabel(app.packageManager))
         assertTrue(BuildConfig.N9_READ_ONLY)
         assertEquals("android.app.Application", info.applicationInfo!!.className)
         assertEquals(listOf("com.bydmate.app.n9.N9DiagnosticsActivity"), info.activities.orEmpty().map { it.name })

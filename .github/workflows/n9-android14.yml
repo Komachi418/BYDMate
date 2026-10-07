@@ -39,6 +39,9 @@ jobs:
           --tests '*N9VariantManifestTest'
           --tests '*N9BatteryComparisonTest'
           --tests '*N9HelperScalarReplyTest'
+          --tests '*N9BatteryReaderTest'
+          --tests '*N9BatteryHistoryTest'
+          --tests '*N9BatteryActivityTest'
           --stacktrace
       - name: Build unsigned APK for retained local signing key
         run: ./gradlew :app:assembleN9Test -Pn9UnsignedForLocalSigning --stacktrace
@@ -56,10 +59,11 @@ jobs:
           root = ET.parse('n9-manifest.xml').getroot()
           name = '{http://schemas.android.com/apk/res/android}name'
           assert root.get('package') == 'com.bydmate.app.n9test2'
-          assert root.get('{http://schemas.android.com/apk/res/android}versionCode') == '504'
+          assert root.get('{http://schemas.android.com/apk/res/android}versionCode') == '505'
+          assert root.get('{http://schemas.android.com/apk/res/android}versionName') == '3.19.9-n9-battery1'
           app = root.find('application')
           assert app.get(name) == 'android.app.Application'
-          assert app.get('{http://schemas.android.com/apk/res/android}label') == 'BYDMate N9 Test 2'
+          assert app.get('{http://schemas.android.com/apk/res/android}label') == 'BYDMate N9 电池'
           assert [x.get(name) for x in app.findall('activity')] == ['com.bydmate.app.n9.N9DiagnosticsActivity']
           assert [x.get(name) for x in app.findall('receiver')] == ['com.bydmate.app.helper.HelperBinderReceiver']
           assert not app.findall('service') and not app.findall('provider') and not app.findall('activity-alias')

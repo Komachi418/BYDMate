@@ -7,12 +7,14 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
 import android.os.Process
 import android.provider.Settings
 import android.text.method.LinkMovementMethod
 import android.text.util.Linkify
+import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -23,13 +25,12 @@ import com.bydmate.app.data.autoservice.AdbKeyStore
 import com.bydmate.app.data.autoservice.AdbOnDeviceClient
 import com.bydmate.app.data.autoservice.AdbOnDeviceClientImpl
 import com.bydmate.app.data.autoservice.AndroidAdbRestoreSystem
-import com.bydmate.app.data.autoservice.AutoserviceClientImpl
-import com.bydmate.app.data.nativestack.FidMap
 import com.bydmate.app.data.vehicle.HelperBootstrap
 import com.bydmate.app.data.vehicle.HelperClientImpl
 import com.bydmate.app.helper.HelperBinderHolder
 import com.bydmate.app.helper.HelperBinderProtocol
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -38,7 +39,11 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.io.File
 import java.util.Locale
+import java.util.UUID
 
 /**
  * Deliberately separate from the normal application graph: no tracker, automation,
@@ -48,64 +53,108 @@ import java.util.Locale
 class N9DiagnosticsActivity : Activity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val keyStore by lazy { AdbKeyStore(applicationContext) }
-    private val adb by lazy { AdbOnDeviceClientImpl(applicationContext, keyStore) }
+    // These two seams let the Activity tests exercise the real reader without a socket.
+    internal var adbFactory: () -> AdbOnDeviceClient = { AdbOnDeviceClientImpl(applicationContext, keyStore) }
+    internal var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+    private val adb by lazy { adbFactory() }
     private val helper by lazy { HelperClientImpl() }
     private val bootstrap by lazy { HelperBootstrap(adb, helper, applicationContext) }
-    private val diagnosticButtons = mutableListOf<Button>()
+    private val history by lazy { N9BatteryHistory(applicationContext) }
+    private val actionButtons = mutableListOf<Button>()
+    private val values = mutableMapOf<String, TextView>()
     private lateinit var reportView: TextView
     private lateinit var statusView: TextView
-    private var report = ""
-    private var pendingExport: String? = null
+    private lateinit var timeView: TextView
+    private lateinit var historyView: TextView
+    private lateinit var diagnosticStatus: TextView
+    private var snapshots = emptyList<N9BatterySnapshot>()
+    private var currentSnapshot: N9BatterySnapshot? = null
+    private var currentSaved = true
+    private var diagnosticText = ""
+    private var pendingExportFile: String? = null
+    private var exporting = false
     private var busy = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         check(BuildConfig.N9_READ_ONLY) { "Diagnostics must use the isolated read-only variant" }
-        report = savedInstanceState?.getString(STATE_REPORT) ?: identityReport()
-        pendingExport = savedInstanceState?.getString(STATE_EXPORT)
+        diagnosticText = savedInstanceState?.getString(STATE_DIAGNOSTICS).orEmpty().takeLast(MAX_DIAGNOSTIC_CHARS)
+        pendingExportFile = savedInstanceState?.getString(STATE_EXPORT)?.takeIf { EXPORT_FILE_REGEX.matches(it) }
 
         val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(18), dp(16), dp(18), dp(24))
             setBackgroundColor(Color.WHITE)
         }
-        body.addView(label("BYDMate N9 Test 2 · 只读电池对照", 25f))
-        body.addView(label(
-            "停车后操作。独立测试包，仅在点击时读取。首次连接可能需要确认车机的 ADB 授权弹窗。" +
-                "第 3 项会通过 Helper 和直接读取两条路径对照电池数据，无需重启车机。", 16f))
-        statusView = label("尚未连接；请选择一次检查。", 16f)
+        body.addView(label("BYDMate N9 电池", 28f))
+        body.addView(label("停车后点击读取。只读电池数据，最近 20 次记录保存在本机。", 16f))
+        statusView = label("正在加载本地历史…", 18f).apply { tag = "batteryStatus" }
         body.addView(statusView)
-        body.addView(diagnosticButton("1. 连接 classic 5555 并读取电池") {
-            runDiagnostic("连接 ADB 并读取电池；如出现授权弹窗，请在车机确认。") { readBattery() }
+        body.addView(metricRow(listOf("soc" to "电量 SOC", "soh" to "车机 SoH"), 38f))
+        body.addView(metricRow(listOf("min" to "最低单体", "max" to "最高单体", "delta" to "单体压差"), 27f))
+        body.addView(metricRow(listOf("total" to "累计电量"), 26f))
+        timeView = label("读取时间：尚未读取", 16f).apply { tag = "batteryTime" }
+        body.addView(timeView)
+        body.addView(actionButton("读取电池并保存", "readBattery") { readAndSaveBattery() }.apply {
+            textSize = 22f
+            minHeight = dp(60)
         })
-        body.addView(diagnosticButton("2. 观察 TLS ADB（约 8 秒）") {
-            runDiagnostic("读取 TLS 设置、端口属性和本机 mDNS 广告…") { observeTls() }
-        })
-        body.addView(diagnosticButton("3. Helper 读取电池并对照") {
-            runDiagnostic("连接独立 Helper，依次对照电池读数；无需重启车机…") { probeHelper() }
-        })
-        body.addView(Button(this).apply {
-            text = "复制诊断报告"
-            setOnClickListener {
+        body.addView(label("首次连接可能需要确认车机的 ADB 授权弹窗。显示“—”的项目表示本次没有有效读数。", 14f))
+        body.addView(label("车机上报值，单次读数不代表实际容量或校准结论。", 14f))
+
+        body.addView(actionButton("复制完整报告", "copyReport") {
+            if (!canAct()) return@actionButton
+            val report = completeReport()
+            try {
                 (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-                    .setPrimaryClip(ClipData.newPlainText("BYDMate N9 diagnostics", report))
-                Toast.makeText(this@N9DiagnosticsActivity, "已复制", Toast.LENGTH_SHORT).show()
+                    .setPrimaryClip(ClipData.newPlainText("BYDMate N9 battery report", report))
+                Toast.makeText(this, "已复制当前结果与全部历史", Toast.LENGTH_SHORT).show()
+            } catch (_: Exception) {
+                Toast.makeText(this, "复制失败，请尝试导出 TXT。", Toast.LENGTH_LONG).show()
             }
         })
+        body.addView(actionButton("导出完整报告 TXT", "exportReport") { exportReport() })
+        body.addView(label("最近记录", 22f))
+        historyView = label("尚无记录", 16f).apply {
+            tag = "batteryHistory"
+            setTextIsSelectable(true)
+        }
+        body.addView(historyView)
+
+        val diagnosticArea = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
         body.addView(Button(this).apply {
-            text = "导出报告为 TXT"
-            setOnClickListener { exportReport() }
+            text = "展开可选诊断"
+            tag = "expandDiagnostics"
+            setOnClickListener {
+                val expanded = diagnosticArea.visibility != View.VISIBLE
+                diagnosticArea.visibility = if (expanded) View.VISIBLE else View.GONE
+                text = if (expanded) "收起可选诊断" else "展开可选诊断"
+            }
         })
-        reportView = label(report, 14f).apply {
+        diagnosticArea.addView(label("以下检查可选，不影响主页电池读取，也不会修改主页读数。", 15f))
+        diagnosticStatus = label("可选诊断尚未执行。", 15f)
+        diagnosticArea.addView(diagnosticStatus)
+        diagnosticArea.addView(actionButton("观察 TLS ADB（约 8 秒）") {
+            runDiagnostic("正在观察 TLS ADB…") { observeTls() }
+        })
+        diagnosticArea.addView(actionButton("Helper 电池读取对照") {
+            runDiagnostic("正在进行 Helper 电池对照…") { probeHelper() }
+        })
+        reportView = label("", 13f).apply {
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
         }
-        body.addView(reportView)
-        body.addView(label(NOTICE, 13f).apply {
+        diagnosticArea.addView(reportView)
+        diagnosticArea.addView(label(NOTICE, 13f).apply {
             autoLinkMask = Linkify.WEB_URLS
             movementMethod = LinkMovementMethod.getInstance()
         })
+        body.addView(diagnosticArea)
         setContentView(ScrollView(this).apply { addView(body) })
+        loadHistory()
     }
 
     private fun label(value: String, size: Float) = TextView(this).apply {
@@ -115,10 +164,147 @@ class N9DiagnosticsActivity : Activity() {
         setPadding(0, dp(6), 0, dp(8))
     }
 
-    private fun diagnosticButton(title: String, action: () -> Unit) = Button(this).apply {
+    private fun actionButton(title: String, viewTag: String? = null, action: () -> Unit) = Button(this).apply {
         text = title
+        tag = viewTag
         setOnClickListener { action() }
-        diagnosticButtons += this
+        actionButtons += this
+    }
+
+    private fun metricRow(items: List<Pair<String, String>>, valueSize: Float) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        items.forEach { (key, title) ->
+            val card = LinearLayout(this@N9DiagnosticsActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(12), dp(8), dp(10), dp(8))
+                background = GradientDrawable().apply {
+                    setColor(Color.rgb(242, 246, 248))
+                    cornerRadius = dp(10).toFloat()
+                }
+                addView(label(title, 15f))
+                val value = label("—", valueSize).apply {
+                    tag = key
+                    typeface = Typeface.DEFAULT_BOLD
+                }
+                values[key] = value
+                addView(value)
+            }
+            addView(card, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                setMargins(dp(3), dp(4), dp(3), dp(4))
+            })
+        }
+    }
+
+    private fun canAct(): Boolean = !busy && !exporting && pendingExportFile == null
+
+    private fun updateControls() {
+        actionButtons.forEach { it.isEnabled = canAct() }
+    }
+
+    private fun loadHistory() {
+        busy = true
+        updateControls()
+        scope.launch {
+            try {
+                snapshots = withContext(ioDispatcher) { history.load() }
+                currentSnapshot = snapshots.lastOrNull()
+                renderSnapshot(currentSnapshot, historical = true)
+                statusView.text = if (currentSnapshot == null) "尚未读取，点击下方按钮开始。"
+                    else "已保存历史，尚未刷新" + if (currentSnapshot?.hasReadings == false) " · 最近一次失败" else ""
+                renderHistory()
+                renderDiagnostics()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                statusView.text = "本地历史读取失败，可以重新读取电池。"
+                renderDiagnostics()
+            } finally {
+                busy = false
+                updateControls()
+            }
+        }
+    }
+
+    private fun renderSnapshot(snapshot: N9BatterySnapshot?, historical: Boolean = false) {
+        // Replace every value, including nulls. Missing values can never borrow an older row.
+        values.getValue("soc").text = snapshot?.soc?.let { format(it.toDouble(), 1) + " %" } ?: "—"
+        values.getValue("soh").text = snapshot?.soh?.let { "$it %" } ?: "—"
+        values.getValue("min").text = snapshot?.minCellMv?.let { format(it / 1000.0, 3) + " V" } ?: "—"
+        values.getValue("max").text = snapshot?.maxCellMv?.let { format(it / 1000.0, 3) + " V" } ?: "—"
+        values.getValue("delta").text = snapshot?.deltaMv?.let { "$it mV" } ?: "—"
+        values.getValue("total").text = snapshot?.totalElecConsumption?.let { format(it.toDouble(), 1) + " kWh" } ?: "—"
+        timeView.text = snapshot?.let {
+            (if (historical) "历史读取时间：" else "本次读取时间：") + displayTime(it.capturedAtMillis)
+        } ?: "读取时间：尚未读取"
+    }
+
+    private fun renderHistory() {
+        historyView.text = snapshots.asReversed().joinToString("\n\n") { item ->
+            buildString {
+                appendLine(displayTime(item.capturedAtMillis) + if (!item.hasReadings) " · 本次失败" else "")
+                appendLine("SOC ${item.soc?.let { format(it.toDouble(), 1) + "%" } ?: "—"}  ·  " +
+                    "SoH ${item.soh?.let { "$it%" } ?: "—"}  ·  " +
+                    "累计 ${item.totalElecConsumption?.let { format(it.toDouble(), 1) + " kWh" } ?: "—"}")
+                append("最低 ${item.minCellMv?.let { format(it / 1000.0, 3) + " V" } ?: "—"}  ·  " +
+                    "最高 ${item.maxCellMv?.let { format(it / 1000.0, 3) + " V" } ?: "—"}  ·  " +
+                    "压差 ${item.deltaMv?.let { "$it mV" } ?: "—"}")
+            }
+        }.ifBlank { "尚无记录" }
+    }
+
+    private fun readAndSaveBattery() {
+        if (!canAct()) return
+        busy = true
+        updateControls()
+        currentSnapshot = null
+        renderSnapshot(null)
+        statusView.text = "读取中…"
+        timeView.text = "正在读取本次数据"
+        scope.launch {
+            try {
+                val result = withContext(ioDispatcher) {
+                    val snapshot = try {
+                        N9BatteryReader(adb).read()
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (failure: Exception) {
+                        N9BatterySnapshot(System.currentTimeMillis(), null, null, null, null, null,
+                            boundedN9Diagnostic("Battery read failed: ${failure.javaClass.simpleName}: ${failure.message}"))
+                    }
+                    val saved = runCatching { history.append(snapshot) }.getOrDefault(false)
+                    // Save and re-read are synchronous in this IO block: a completed snapshot
+                    // reaches disk even if the Activity is destroyed before the UI resumes.
+                    Triple(snapshot, saved, if (saved) runCatching { history.load() }
+                        .getOrDefault((snapshots + snapshot).takeLast(20)) else snapshots)
+                }
+                currentSnapshot = result.first
+                currentSaved = result.second
+                snapshots = result.third
+                renderSnapshot(result.first)
+                val complete = result.first.let {
+                    it.soc != null && it.soh != null && it.totalElecConsumption != null &&
+                        it.minCellMv != null && it.maxCellMv != null && it.deltaMv != null
+                }
+                statusView.text = when {
+                    !result.first.hasReadings -> "本次失败，没有有效读数"
+                    !complete -> "本次读取完成，部分数据不可用"
+                    else -> "本次读取完成"
+                } + if (result.second) " · 已保存" else " · 保存失败，请复制或导出报告"
+                renderHistory()
+                renderDiagnostics()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                currentSnapshot = null
+                renderSnapshot(null)
+                statusView.text = "本次失败，记录未完成，请重试。"
+                appendDiagnostic("Battery operation failed: ${failure.javaClass.simpleName}: ${failure.message}")
+            } finally {
+                withContext(NonCancellable + ioDispatcher) { runCatching { adb.shutdown() } }
+                busy = false
+                updateControls()
+            }
+        }
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
@@ -136,9 +322,8 @@ class N9DiagnosticsActivity : Activity() {
         appendLine("externalFilesDir=${getExternalFilesDir(null)}")
         appendLine("apk=$packageCodePath")
         appendLine("Helper process=${HelperBinderProtocol.PROCESS_NAME}")
-        appendLine("Helper transport=NOT_RUN; classic5555=NOT_RUN; TLS=NOT_RUN")
-        appendLine("autoservice probe/raw Parcel=NOT_RUN; SOC/SoH/min/max/cell delta=NOT_RUN")
-        appendLine("Helper battery comparison=NOT_RUN（以下操作分段记录实际结果）")
+        appendLine("主页通道=classic 5555 / autoservice GET；各次握手和原始 Parcel 见对应记录。")
+        appendLine("Helper/TLS 仅手动可选诊断；没有对应记录即未执行。")
         appendLine("独立包：不操作官方 BYDMate 数据或 WRITE_SECURE_SETTINGS 授权。")
         appendLine("TLS 仅观察，不配对、不恢复端口、不改系统设置。")
         appendLine("数据为顺序读取的诊断值，不代表电池健康结论。")
@@ -146,86 +331,60 @@ class N9DiagnosticsActivity : Activity() {
     }
 
     private fun runDiagnostic(progress: String, action: suspend () -> String) {
-        if (busy) return
+        if (!canAct()) return
         busy = true
-        diagnosticButtons.forEach { it.isEnabled = false }
-        statusView.text = progress
+        updateControls()
+        diagnosticStatus.text = progress
         scope.launch {
             try {
-                val result = withContext(Dispatchers.IO) { action() }
-                appendReport(result)
-                statusView.text = "本次检查完成，可复制或导出报告。"
+                val result = withContext(ioDispatcher) { action() }
+                appendDiagnostic(result)
+                diagnosticStatus.text = "可选检查完成，结果已加入完整报告。"
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                appendReport("检查失败：${failure.javaClass.simpleName}: ${failure.message}")
-                statusView.text = "检查未完成，错误已记录。"
+                appendDiagnostic("检查失败：${failure.javaClass.simpleName}: ${failure.message}")
+                diagnosticStatus.text = "可选检查未完成，错误已记录。主页结果未变。"
             } finally {
                 // No persistent ADB connection or background battery polling after a check.
-                withContext(NonCancellable + Dispatchers.IO) { adb.shutdown() }
+                withContext(NonCancellable + ioDispatcher) { runCatching { adb.shutdown() } }
                 busy = false
-                diagnosticButtons.forEach { it.isEnabled = true }
+                updateControls()
             }
         }
     }
 
-    private fun appendReport(section: String) {
+    private fun appendDiagnostic(section: String) {
         val addition = "\n--- ${Instant.now()} ---\n$section\n"
-        if (report.length + addition.length > MAX_REPORT_CHARS) report = identityReport()
-        report += addition
-        reportView.text = report
+        val combined = diagnosticText + addition
+        val marker = "[较早的可选诊断已省略；电池历史另行完整保留]\n"
+        diagnosticText = if (combined.length <= MAX_DIAGNOSTIC_CHARS) combined
+            else marker + combined.takeLast(MAX_DIAGNOSTIC_CHARS - marker.length)
+        renderDiagnostics()
     }
 
-    private suspend fun readBattery(): String = buildString {
-        appendLine("[classic 5555 / battery]")
-        val connection = adb.connect()
-        appendLine("classic5555 handshake=${connection.isSuccess} connected=${adb.isConnected()}")
-        appendLine("classic5555 failure=${adb.lastConnectFailure() ?: "none"}")
-        appendLine("检查结束后主动断开 ADB；以上为本次握手结果。")
-        if (connection.isFailure) {
-            appendLine("autoservice probe=NOT_RUN（classic ADB 未连接）")
-            appendLine("SOC=不可用; SoH=不可用; min cell=不可用; max cell=不可用; cell delta=不可用")
-            appendLine("连接错误=${connection.exceptionOrNull()?.message}")
-            return@buildString
+    private fun renderDiagnostics() {
+        reportView.text = buildString {
+            append(identityReport())
+            currentSnapshot?.let { appendLine(it.toBatteryReportText()) }
+            append(diagnosticText)
         }
+    }
 
-        val transcript = StringBuilder()
-        // Capture the exact response used by the production decoder, not a second probe
-        // whose value/timing might differ. Delegation retains the original write barrier.
-        val recordingAdb = object : AdbOnDeviceClient by adb {
-            override suspend fun exec(cmd: String): String? = adb.exec(cmd).also { raw ->
-                transcript.appendLine("\$ $cmd")
-                transcript.appendLine(raw ?: "<transport returned null>")
-            }
-        }
-        val autoservice = AutoserviceClientImpl(recordingAdb)
-        suspend fun readInt(field: String): Int? = FidMap.byField.getValue(field).let {
-            autoservice.getInt(it.device, it.fid)
-        }
-        suspend fun readFloat(field: String): Float? = FidMap.byField.getValue(field).let {
-            autoservice.getFloat(it.device, it.fid)
-        }
-        val soh = readInt("soh")?.takeIf { it in 0..100 }
-        val soc = readFloat("soc")?.takeIf { it in 0f..100f }
-        val lifetime = readFloat("totalElecConsumption")?.takeIf { it >= 0f }
-        fun cellVoltage(raw: Int?): Double? = raw?.let { it / 1000.0 }?.takeIf { it in 0.5..6.0 }
-        val minCell = cellVoltage(readInt("minCellVoltage"))
-        val maxCell = cellVoltage(readInt("maxCellVoltage"))
-        val deltaMv = if (minCell != null && maxCell != null && maxCell >= minCell) {
-            (maxCell - minCell) * 1000.0
-        } else null
-        appendLine("autoservice probe=${if (soh != null || soc != null || lifetime != null) "VALID_READING" else "NO_VALID_READING"}")
-        appendLine("SoH=${soh?.let { "$it %" } ?: UNAVAILABLE}")
-        appendLine("SOC=${soc?.let { "$it %" } ?: UNAVAILABLE}")
-        appendLine("累计电量=${lifetime?.let { "$it kWh" } ?: UNAVAILABLE}")
-        appendLine("min cell=${minCell?.let { format(it, 3) + " V" } ?: UNAVAILABLE}")
-        appendLine("max cell=${maxCell?.let { format(it, 3) + " V" } ?: UNAVAILABLE}")
-        appendLine("cell delta=${deltaMv?.let { format(it, 1) + " mV" } ?: UNAVAILABLE}")
-        appendLine("使用仓库既有 FidMap；单体电压按 mV 解码，0.5–6 V 合理性校验。")
-        appendLine("当前 N9 固件是否支持各 FID，以实际返回为准；不扫描未知接口。")
-        appendLine("[autoservice raw Parcel — original whitespace preserved]")
-        append(transcript)
-        appendLine("classic5555 connected after reads=${adb.isConnected()}")
+    private fun completeReport(): String = buildString {
+        append(identityReport())
+        appendLine("[displayed battery result]")
+        appendLine("screen state=${statusView.text}")
+        appendLine("current saved=$currentSaved")
+        appendLine(currentSnapshot?.toBatteryReportText() ?: "尚未读取")
+        appendLine(n9BatteryHistoryText(snapshots))
+        appendLine("[optional diagnostics; absent means NOT_RUN]")
+        append(diagnosticText)
+    }.let { full ->
+        // History bounds each raw diagnostic to 16 KiB and keeps 20 rows, so the
+        // ordinary full report fits. Keep an explicit last-resort bound as well.
+        if (full.length <= MAX_REPORT_CHARS) full
+        else full.take(MAX_REPORT_CHARS) + "\n[REPORT SIZE LIMIT: trailing text truncated]\n" + NOTICE
     }
 
     private suspend fun observeTls(): String = buildString {
@@ -286,7 +445,7 @@ class N9DiagnosticsActivity : Activity() {
         if (ready && alive && version == BuildConfig.VERSION_CODE.toLong()) {
             appendLine(N9BatteryComparison(adb, helper).read().toReportText())
         } else {
-            appendLine("Helper battery comparison=NOT_RUN（Helper 未就绪或版本不匹配；可用第 1 项单独直接读取）")
+            appendLine("Helper battery comparison=NOT_RUN（Helper 未就绪或版本不匹配；主页仍可单独读取）")
         }
         appendLine("[isolated helper log]")
         appendLine(redactToken(adb.readHelperLog()?.takeLast(12_000) ?: "unavailable"))
@@ -301,18 +460,39 @@ class N9DiagnosticsActivity : Activity() {
     }
 
     private fun exportReport() {
-        pendingExport = report
-        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "text/plain"
-            putExtra(Intent.EXTRA_TITLE, "bydmate_n9_${System.currentTimeMillis()}.txt")
-        }
-        try {
-            @Suppress("DEPRECATION")
-            startActivityForResult(intent, EXPORT_REQUEST)
-        } catch (_: android.content.ActivityNotFoundException) {
-            pendingExport = null
-            Toast.makeText(this, "车机未提供文件选择器，请使用复制报告。", Toast.LENGTH_LONG).show()
+        if (!canAct()) return
+        val frozenReport = completeReport()
+        exporting = true
+        updateControls()
+        scope.launch {
+            var cacheFile: File? = null
+            try {
+                // Freeze a complete report before opening the picker. Save only the small
+                // filename in instance state, never hundreds of KiB of raw Parcel history.
+                cacheFile = withContext(ioDispatcher) {
+                    File(cacheDir, "n9_battery_export_${UUID.randomUUID()}.txt").also {
+                        it.writeText(frozenReport, Charsets.UTF_8)
+                    }
+                }
+                pendingExportFile = cacheFile.name
+                val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TITLE, "bydmate_n9_${System.currentTimeMillis()}.txt")
+                }
+                @Suppress("DEPRECATION")
+                startActivityForResult(intent, EXPORT_REQUEST)
+            } catch (cancelled: CancellationException) {
+                cacheFile?.delete()
+                throw cancelled
+            } catch (_: Exception) {
+                cacheFile?.delete()
+                pendingExportFile = null
+                Toast.makeText(this@N9DiagnosticsActivity, "无法打开文件选择器，请使用复制完整报告。", Toast.LENGTH_LONG).show()
+            } finally {
+                exporting = false
+                updateControls()
+            }
         }
     }
 
@@ -320,25 +500,39 @@ class N9DiagnosticsActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != EXPORT_REQUEST) return
-        val snapshot = pendingExport
-        pendingExport = null
+        val fileName = pendingExportFile
+        pendingExportFile = null
         val uri = data?.data
-        if (resultCode != RESULT_OK || uri == null || snapshot == null) return
+        if (fileName == null) return
+        val frozenFile = File(cacheDir, fileName)
+        if (resultCode != RESULT_OK || uri == null) {
+            frozenFile.delete()
+            updateControls()
+            return
+        }
+        exporting = true
+        updateControls()
         scope.launch {
-            val saved = withContext(Dispatchers.IO) {
-                runCatching {
-                    checkNotNull(contentResolver.openOutputStream(uri, "wt"))
-                        .bufferedWriter(Charsets.UTF_8).use { it.write(snapshot) }
+            try {
+                val saved = withContext(NonCancellable + ioDispatcher) {
+                    runCatching {
+                        frozenFile.inputStream().use { input ->
+                            checkNotNull(contentResolver.openOutputStream(uri, "wt")).use { output -> input.copyTo(output) }
+                        }
+                    }.also { frozenFile.delete() }
                 }
+                Toast.makeText(this@N9DiagnosticsActivity,
+                    if (saved.isSuccess) "完整报告已导出" else "导出失败，请复制完整报告。", Toast.LENGTH_LONG).show()
+            } finally {
+                exporting = false
+                updateControls()
             }
-            Toast.makeText(this@N9DiagnosticsActivity,
-                if (saved.isSuccess) "报告已导出" else "导出失败，请复制报告。", Toast.LENGTH_LONG).show()
         }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
-        outState.putString(STATE_REPORT, report)
-        outState.putString(STATE_EXPORT, pendingExport)
+        outState.putString(STATE_DIAGNOSTICS, diagnosticText)
+        outState.putString(STATE_EXPORT, pendingExportFile)
         super.onSaveInstanceState(outState)
     }
 
@@ -350,12 +544,16 @@ class N9DiagnosticsActivity : Activity() {
     private fun format(value: Double, decimals: Int): String =
         String.format(Locale.ROOT, "%.${decimals}f", value)
 
+    private fun displayTime(millis: Long): String = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+        .withZone(ZoneId.systemDefault()).format(Instant.ofEpochMilli(millis))
+
     companion object {
         private const val EXPORT_REQUEST = 901
-        private const val STATE_REPORT = "n9_report"
+        private const val STATE_DIAGNOSTICS = "n9_diagnostics"
         private const val STATE_EXPORT = "n9_export"
-        private const val MAX_REPORT_CHARS = 80_000
-        private const val UNAVAILABLE = "不可用（无有效读数/接口未确认，见 raw Parcel）"
+        private const val MAX_DIAGNOSTIC_CHARS = 32_768
+        private const val MAX_REPORT_CHARS = 512_000
+        private val EXPORT_FILE_REGEX = Regex("n9_battery_export_[0-9a-f-]{36}\\.txt")
         private const val NOTICE = "PolyForm Noncommercial 1.0.0\n" +
             "https://polyformproject.org/licenses/noncommercial/1.0.0\n" +
             "Required Notice: Copyright AndyShaman (https://github.com/AndyShaman/BYDMate)"

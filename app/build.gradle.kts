@@ -69,7 +69,7 @@ android {
         create("n9Test") {
             initWith(getByName("debug"))
             applicationIdSuffix = ".n9test2"
-            versionNameSuffix = "-n9-readonly2"
+            versionNameSuffix = "-n9-battery1"
             signingConfig = signingConfigs.findByName("n9Test")
             buildConfigField("boolean", "N9_READ_ONLY", "true")
             matchingFallbacks += listOf("debug")
@@ -171,7 +171,7 @@ android {
 
 androidComponents {
     onVariants(selector().withBuildType("n9Test")) { variant ->
-        variant.outputs.forEach { output -> output.versionCode.set(504) }
+        variant.outputs.forEach { output -> output.versionCode.set(505) }
     }
 }
 

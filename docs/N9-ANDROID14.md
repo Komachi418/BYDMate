@@ -1,15 +1,17 @@
-# N9 / Android 14 read-only test
+# N9 / Android 14 read-only battery build (505)
 
 This branch belongs to `Komachi418/BYDMate`. It is a diagnostic test build, not a
 production vehicle-control release. No vehicle write/control tests are permitted.
 
 ## Install and use
 
-- Install the delivered locally signed **BYDMate-v3.19.9-n9-readonly2.apk**.
+- Install the delivered locally signed **BYDMate-v3.19.9-n9-battery1.apk**.
   The fork's **N9 Android 14 read-only APK (unsigned for local signing)** Actions
   artifact is a build intermediate and requires the retained local key before it
   can be installed. Do not install an APK whose filename ends in `-unsigned.apk`.
-- This revision is **com.bydmate.app.n9test2**, labelled **BYDMate N9 Test 2**.
+- This revision is **com.bydmate.app.n9test2**, labelled **BYDMate N9 电池**,
+  version code **505**. It retains Test 2's local signing certificate and package
+  so it can update Test 2 if that package is already installed.
   It can also coexist with the first test APK (`com.bydmate.app.n9test`). The
   first CI build used an ephemeral debug signing key; Test 2 starts a separate
   installation with a retained test signing key so later Test 2 builds can update
@@ -19,20 +21,32 @@ production vehicle-control release. No vehicle write/control tests are permitted
 - Run only while parked. Keep the official app responsible for its existing ADB
   recovery. This package does not enable wireless debugging, restore port 5555,
   grant permissions, pair TLS ADB, or issue vehicle controls.
-- Open **BYDMate N9 Test 2** and press **3. Helper 读取电池并对照**. This connects
-  the isolated Helper and reads the same five known battery fields through the
-  direct ADB and Helper Binder paths, interleaving each pair of reads. No head-unit
-  restart or force-stop is required. Button 1 remains a separate direct-only read.
-  A separate ADB
+- Open **BYDMate N9 电池** and press **读取电池并保存**. The main screen uses
+  the direct classic 5555 / autoservice path already exercised on the user's N9
+  in the first test. It displays SOC, SoH, min/max cell voltage, cell delta and the
+  cumulative energy counter. A separate ADB
   authorization prompt may appear because this package owns a separate key.
-- Save or copy the diagnostic report. Check Android userId, classic 5555 connection,
+- Each button press reads once and saves the result, including unavailable fields
+  and failed attempts, into the app's private storage. The last 20 attempts survive
+  reopening the app. Previously saved values are labelled as history; starting a
+  new read clears the displayed values until that attempt completes. A failed read
+  must never substitute an old value or a numeric zero. Partial results retain only
+  the fields that actually succeeded. Local save failures are visible.
+- Copy or export the retained readings and diagnostic report as TXT. The export
+  includes timestamps and original raw Parcels. There is no automatic upload,
+  background polling, or startup ADB connection. Sequential fields are a snapshot
+  collected over time, not an atomic battery measurement.
+- Optional Helper comparison and TLS observation remain in the expandable
+  diagnostic area. A Helper failure does not block the battery screen. No head-unit
+  restart or force-stop is needed for the normal reading flow.
+- The diagnostic report includes Android userId, classic 5555 connection,
   TLS observation, autoservice probe/raw Parcel, SOC/SoH, cell readings and Helper
   transport. Unsupported/unavailable values must remain unavailable, not zero.
 - Helper comparison retains raw direct Parcels and Helper per-item status/raw bits.
   A missing/invalid read stays unavailable, even when both paths fail. SAME means
   both valid reads agreed for that pair; DIFFERENT can reflect change between the
   sequential readings and is not by itself a defect or a health conclusion. A
-  failed Helper must not hide the separate direct-only battery read. Do not change SELinux,
+  failed Helper must not hide the direct battery read. Do not change SELinux,
   root the head unit, or use permissive mode to make it work.
 
 ## Evidence and root causes
@@ -67,8 +81,9 @@ provided the first successful device check on 2026-10-07:
 - `addService` was still denied by SELinux, but broadcast Binder delivery, ping,
   version 503 and client registration succeeded (`registerClient=0` is success).
 - That first test read battery values through direct ADB. It did not exercise
-  Helper battery reads, which is the purpose of this revision. Reboot recovery,
-  sustained operation, and the new comparison remain separate device checks.
+  Helper battery reads. Version 505 uses the proven direct path for its battery
+  screen; Helper comparison remains an optional, unverified device check. Reboot
+  recovery and sustained operation remain separate device checks.
 - TLS was only observed; no TLS authentication or pairing was attempted. No
   vehicle write/control test was performed. Single readings are not an independent
   battery capacity or calibration assessment.
@@ -101,13 +116,23 @@ AOSP references:
 
 The dedicated Actions workflow runs focused scalar parsing, user routing,
 authentication, helper read-only policy and merged-manifest tests, then builds
-`:app:assembleN9Test`. Test 2 CI produces an explicitly unsigned APK, notices,
+`:app:assembleN9Test`. CI produces an explicitly unsigned APK, notices,
 SHA256SUMS and test reports. The installable delivery is signed and verified locally
 with a retained dedicated test key. The private key stays outside the repository
 and artifacts; the unsigned CI APK is not directly installable. Local checks or a
 successful build are not evidence that this new APK has run on the N9.
 
-Remaining device checks: Helper-to-autoservice reads and comparison in Test 2,
+The first N9 APK installed successfully and used APK Signature Scheme v2 only.
+The user reported that Test 2 was rejected by the head-unit installer. Test 2 has
+valid v1, v2 and v3 signatures; a default verifier selecting v3 does not mean its
+v2 signature is absent. The installer rejection's exact cause remains unknown.
+Version 505 deliberately uses v2-only signing like the first installed APK, with
+the retained Test 2 certificate. This is a compatibility choice, not proof that
+the installer problem is fixed. Verify signature, certificate, package/version,
+ZIP integrity, page alignment, unchanged CI payload and embedded license locally.
+
+Remaining device checks: installation and main screen/history/export on the N9,
+Helper-to-autoservice reads and comparison,
 recovery after process/head-unit restarts, long-term availability, and TLS discovery
 and authorization. First-test evidence does not establish every firmware's FID
 meaning/scaling or all cross-user permissions.
