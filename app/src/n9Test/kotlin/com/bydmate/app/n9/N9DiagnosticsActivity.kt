@@ -69,10 +69,10 @@ class N9DiagnosticsActivity : Activity() {
             setPadding(dp(18), dp(16), dp(18), dp(24))
             setBackgroundColor(Color.WHITE)
         }
-        body.addView(label("BYDMate N9 只读诊断", 25f))
+        body.addView(label("BYDMate N9 Test 2 · 只读电池对照", 25f))
         body.addView(label(
             "停车后操作。独立测试包，仅在点击时读取。首次连接可能需要确认车机的 ADB 授权弹窗。" +
-                "电池读取不依赖 Helper；Helper 按钮只测试本测试包的隔离进程。", 16f))
+                "第 3 项会通过 Helper 和直接读取两条路径对照电池数据，无需重启车机。", 16f))
         statusView = label("尚未连接；请选择一次检查。", 16f)
         body.addView(statusView)
         body.addView(diagnosticButton("1. 连接 classic 5555 并读取电池") {
@@ -81,8 +81,8 @@ class N9DiagnosticsActivity : Activity() {
         body.addView(diagnosticButton("2. 观察 TLS ADB（约 8 秒）") {
             runDiagnostic("读取 TLS 设置、端口属性和本机 mDNS 广告…") { observeTls() }
         })
-        body.addView(diagnosticButton("3. 测试独立 Helper 广播通道") {
-            runDiagnostic("启动或重用测试包 Helper，检查 userId 与 transport…") { probeHelper() }
+        body.addView(diagnosticButton("3. Helper 读取电池并对照") {
+            runDiagnostic("连接独立 Helper，依次对照电池读数；无需重启车机…") { probeHelper() }
         })
         body.addView(Button(this).apply {
             text = "复制诊断报告"
@@ -131,12 +131,14 @@ class N9DiagnosticsActivity : Activity() {
         appendLine("Android=${Build.VERSION.RELEASE} sdk=${Build.VERSION.SDK_INT}")
         appendLine("manufacturer=${Build.MANUFACTURER} model=${Build.MODEL}")
         appendLine("uid=${Process.myUid()} Android userId=${Process.myUid() / 100000}")
+        appendLine("app process pid=${Process.myPid()}")
         appendLine("filesDir=$filesDir")
         appendLine("externalFilesDir=${getExternalFilesDir(null)}")
         appendLine("apk=$packageCodePath")
         appendLine("Helper process=${HelperBinderProtocol.PROCESS_NAME}")
         appendLine("Helper transport=NOT_RUN; classic5555=NOT_RUN; TLS=NOT_RUN")
         appendLine("autoservice probe/raw Parcel=NOT_RUN; SOC/SoH/min/max/cell delta=NOT_RUN")
+        appendLine("Helper battery comparison=NOT_RUN（以下操作分段记录实际结果）")
         appendLine("独立包：不操作官方 BYDMate 数据或 WRITE_SECURE_SETTINGS 授权。")
         appendLine("TLS 仅观察，不配对、不恢复端口、不改系统设置。")
         appendLine("数据为顺序读取的诊断值，不代表电池健康结论。")
@@ -281,9 +283,14 @@ class N9DiagnosticsActivity : Activity() {
         bootstrap.lastSpawnFailure()?.let {
             appendLine("lastSpawnFailure=${it.reason}: ${redactToken(it.detail)}")
         }
+        if (ready && alive && version == BuildConfig.VERSION_CODE.toLong()) {
+            appendLine(N9BatteryComparison(adb, helper).read().toReportText())
+        } else {
+            appendLine("Helper battery comparison=NOT_RUN（Helper 未就绪或版本不匹配；可用第 1 项单独直接读取）")
+        }
         appendLine("[isolated helper log]")
         appendLine(redactToken(adb.readHelperLog()?.takeLast(12_000) ?: "unavailable"))
-        appendLine("Helper 只检查握手、版本与通道；车辆写事务在此变体的 daemon 中被拒绝。")
+        appendLine("Helper 电池对照仅使用既有 GET 接口；车辆写事务在此变体的 daemon 中被拒绝。")
     }
 
     private fun redactToken(text: String): String {

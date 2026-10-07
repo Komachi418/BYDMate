@@ -1,4 +1,4 @@
-name: N9 Android 14 read-only APK
+name: N9 Android 14 read-only APK (unsigned for local signing)
 
 on:
   push:
@@ -33,31 +33,39 @@ jobs:
           --tests '*HelperBinderHolderTest'
           --tests '*RegistrationFallbackTest'
           --tests '*HelperClientBinderTest'
+          --tests '*HelperClientBatchTest'
           --tests '*HelperDaemonBatchTest'
           --tests '*N9AdbReadOnlyTest'
           --tests '*N9VariantManifestTest'
+          --tests '*N9BatteryComparisonTest'
+          --tests '*N9HelperScalarReplyTest'
           --stacktrace
-      - name: Build independent debug-signed APK
-        run: ./gradlew :app:assembleN9Test --stacktrace
+      - name: Build unsigned APK for retained local signing key
+        run: ./gradlew :app:assembleN9Test -Pn9UnsignedForLocalSigning --stacktrace
       - name: Verify packaged identity and component isolation
         run: |
           apk=(app/build/outputs/apk/n9Test/*.apk)
           "$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer" manifest print "${apk[0]}" > n9-manifest.xml
           signer=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
-          "$signer" verify --verbose "${apk[0]}"
+          if "$signer" verify "${apk[0]}"; then
+            echo 'ERROR: CI must not create a temporary signing identity.'
+            exit 1
+          fi
           python3 - <<'PY'
           import xml.etree.ElementTree as ET
           root = ET.parse('n9-manifest.xml').getroot()
           name = '{http://schemas.android.com/apk/res/android}name'
-          assert root.get('package') == 'com.bydmate.app.n9test'
+          assert root.get('package') == 'com.bydmate.app.n9test2'
+          assert root.get('{http://schemas.android.com/apk/res/android}versionCode') == '504'
           app = root.find('application')
           assert app.get(name) == 'android.app.Application'
+          assert app.get('{http://schemas.android.com/apk/res/android}label') == 'BYDMate N9 Test 2'
           assert [x.get(name) for x in app.findall('activity')] == ['com.bydmate.app.n9.N9DiagnosticsActivity']
           assert [x.get(name) for x in app.findall('receiver')] == ['com.bydmate.app.helper.HelperBinderReceiver']
           assert not app.findall('service') and not app.findall('provider') and not app.findall('activity-alias')
           permissions = {x.get(name) for x in root.findall('uses-permission')}
           assert not permissions.intersection({'android.permission.WRITE_SECURE_SETTINGS', 'android.permission.RECEIVE_BOOT_COMPLETED', 'android.permission.SYSTEM_ALERT_WINDOW', 'android.permission.REQUEST_INSTALL_PACKAGES'})
-          print('PASS: APK package, signature and diagnostic-only components')
+          print('PASS: unsigned APK identity and diagnostic-only components; local signing required')
           PY
       - name: Package notices and checksums
         run: |
@@ -65,11 +73,15 @@ jobs:
           cp app/build/outputs/apk/n9Test/*.apk n9-artifact/
           cp LICENSE docs/N9-ANDROID14.md n9-artifact/
           cp n9-manifest.xml n9-artifact/
+          printf '%s\n' 'UNSIGNED BUILD: this artifact cannot be installed directly.' \
+            'Sign it locally with the retained dedicated N9 Test 2 keystore and verify its certificate.' \
+            'The private signing key is not stored in GitHub or included in any artifact.' \
+            > n9-artifact/UNSIGNED-READ-ME.txt
           cd n9-artifact
           sha256sum *.apk > SHA256SUMS.txt
       - uses: actions/upload-artifact@v7
         with:
-          name: BYDMate-N9-readonly-${{ github.sha }}
+          name: BYDMate-N9-unsigned-${{ github.sha }}
           path: n9-artifact/
           if-no-files-found: error
           retention-days: 14

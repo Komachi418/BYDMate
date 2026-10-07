@@ -19,7 +19,10 @@ class N9VariantManifestTest {
             PackageManager.GET_ACTIVITIES or PackageManager.GET_RECEIVERS or
                 PackageManager.GET_SERVICES or PackageManager.GET_PROVIDERS or
                 PackageManager.GET_PERMISSIONS)
-        assertEquals("com.bydmate.app.n9test", BuildConfig.APPLICATION_ID)
+        assertEquals("com.bydmate.app.n9test2", BuildConfig.APPLICATION_ID)
+        assertEquals(504, BuildConfig.VERSION_CODE)
+        assertEquals(504L, info.longVersionCode)
+        assertEquals("BYDMate N9 Test 2", app.applicationInfo.loadLabel(app.packageManager))
         assertTrue(BuildConfig.N9_READ_ONLY)
         assertEquals("android.app.Application", info.applicationInfo!!.className)
         assertEquals(listOf("com.bydmate.app.n9.N9DiagnosticsActivity"), info.activities.orEmpty().map { it.name })

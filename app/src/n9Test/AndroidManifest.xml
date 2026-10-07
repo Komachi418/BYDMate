@@ -30,7 +30,7 @@
         tools:node="replace"
         android:name="android.app.Application"
         android:allowBackup="false"
-        android:label="BYDMate N9 Test"
+        android:label="BYDMate N9 Test 2"
         android:icon="@mipmap/ic_launcher"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:networkSecurityConfig="@xml/network_security_config">

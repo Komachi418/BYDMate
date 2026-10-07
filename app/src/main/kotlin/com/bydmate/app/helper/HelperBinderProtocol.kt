@@ -8,6 +8,7 @@ import com.bydmate.app.data.autoservice.FidRegistry
 internal fun helperRuntimeName(applicationId: String): String = when (applicationId) {
     "com.bydmate.app" -> "bydmate_helper"
     "com.bydmate.app.n9test" -> "bydmate_n9test"
+    "com.bydmate.app.n9test2" -> "bydmate_n9test2"
     // Linux comm is limited to 15 characters. Never truncate a package name to a shared prefix.
     else -> "byd_" + Integer.toUnsignedString(applicationId.hashCode(), 16)
 }

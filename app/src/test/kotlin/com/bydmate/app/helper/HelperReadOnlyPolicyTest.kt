@@ -39,8 +39,12 @@ class HelperReadOnlyPolicyTest {
     @Test fun `parallel variant cannot target official helper resources`() {
         val official = helperRuntimeName("com.bydmate.app")
         val n9 = helperRuntimeName("com.bydmate.app.n9test")
+        val n9v2 = helperRuntimeName("com.bydmate.app.n9test2")
         assertEquals("bydmate_helper", official)
         assertEquals("bydmate_n9test", n9)
+        assertEquals("bydmate_n9test2", n9v2)
+        assertEquals(3, setOf(official, n9, n9v2).size)
+        assertTrue(n9v2.length <= 15)
         assertNotEquals(official, n9)
         assertTrue(n9.length <= 15)
         assertNotEquals(n9, helperRuntimeName("com.bydmate.app.other"))

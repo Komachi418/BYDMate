@@ -1128,7 +1128,7 @@ internal fun readTrailingToTop(data: Parcel): Boolean =
  *   avail >= 4 → status = reply.readInt() else -999
  *   avail >= 8 → retInt = reply.readInt() else 0
  */
-private fun autoserviceTransact(
+internal fun autoserviceTransact(
     svc: IBinder,
     autoIface: String,
     tx: Int,
@@ -1145,8 +1145,11 @@ private fun autoserviceTransact(
         data2.writeInt(dev)
         data2.writeInt(fid)
         if (writeValue) data2.writeInt(value)
-        svc.transact(tx, data2, reply2, 0)
+        val transacted = svc.transact(tx, data2, reply2, 0)
         val avail = reply2.dataAvail()
+        // A rejected or header-only GET is not a successful zero battery reading.
+        // Keep legacy behavior outside the isolated N9 diagnostic variant.
+        if (BuildConfig.N9_READ_ONLY && (!transacted || avail < 8)) return -999 to 0
         val status = if (avail >= 4) reply2.readInt() else -999
         val retInt = if (avail >= 8) reply2.readInt() else 0
         status to retInt

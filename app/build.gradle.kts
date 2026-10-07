@@ -19,6 +19,13 @@ val keystoreProps = Properties().apply {
     if (keystorePropsFile.exists()) load(FileInputStream(keystorePropsFile))
 }
 
+// Dedicated diagnostic signing identity. The retained key stays on the maintainer's
+// computer; CI can explicitly build an unsigned APK for subsequent local signing.
+val n9SigningStore = System.getenv("N9_TEST_KEYSTORE_PATH")
+val n9SigningPassword = System.getenv("N9_TEST_KEYSTORE_PASSWORD")
+val hasN9Signing = !n9SigningStore.isNullOrBlank() && !n9SigningPassword.isNullOrBlank()
+val allowUnsignedN9 = project.hasProperty("n9UnsignedForLocalSigning")
+
 android {
     namespace = "com.bydmate.app"
     compileSdk = 34
@@ -40,6 +47,14 @@ android {
     }
 
     signingConfigs {
+        if (hasN9Signing) {
+            create("n9Test") {
+                storeFile = file(n9SigningStore!!)
+                storePassword = n9SigningPassword
+                keyAlias = "n9-test"
+                keyPassword = n9SigningPassword
+            }
+        }
         if (keystorePropsFile.exists()) {
             create("release") {
                 storeFile = file(keystoreProps.getProperty("storeFile"))
@@ -53,8 +68,9 @@ android {
     buildTypes {
         create("n9Test") {
             initWith(getByName("debug"))
-            applicationIdSuffix = ".n9test"
-            versionNameSuffix = "-n9-readonly"
+            applicationIdSuffix = ".n9test2"
+            versionNameSuffix = "-n9-readonly2"
+            signingConfig = signingConfigs.findByName("n9Test")
             buildConfigField("boolean", "N9_READ_ONLY", "true")
             matchingFallbacks += listOf("debug")
         }
@@ -73,7 +89,8 @@ android {
         val variant = this
         variant.outputs.all {
             val output = this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
-            output.outputFileName = "BYDMate-v${variant.versionName}.apk"
+            val unsignedSuffix = if (variant.buildType.name == "n9Test" && !hasN9Signing) "-unsigned" else ""
+            output.outputFileName = "BYDMate-v${variant.versionName}$unsignedSuffix.apk"
         }
     }
 
@@ -152,9 +169,23 @@ android {
     }
 }
 
+androidComponents {
+    onVariants(selector().withBuildType("n9Test")) { variant ->
+        variant.outputs.forEach { output -> output.versionCode.set(504) }
+    }
+}
+
 // AC-12: a publishable release APK must be signed. Debug and CI builds are
 // unaffected; explicit escape hatch for exotic cases.
 gradle.taskGraph.whenReady {
+    val packagesN9 = allTasks.any { it.name == "packageN9Test" || it.name == "bundleN9Test" }
+    if (packagesN9 && !hasN9Signing && !allowUnsignedN9) {
+        throw GradleException(
+            "N9 test signing key missing: set N9_TEST_KEYSTORE_PATH and " +
+            "N9_TEST_KEYSTORE_PASSWORD, or explicitly use -Pn9UnsignedForLocalSigning. " +
+            "A temporary debug signing key is not allowed."
+        )
+    }
     val wantsRelease = allTasks.any { it.name == "assembleRelease" || it.name == "bundleRelease" }
     if (wantsRelease && !keystorePropsFile.exists() && !project.hasProperty("allowUnsignedRelease")) {
         throw GradleException(

@@ -54,7 +54,7 @@ class N9AdbReadOnlyTest {
 
         assertTrue(fake.commands.all { HelperBinderProtocol.PROCESS_NAME in it })
         assertTrue(fake.commands.none { "bydmate_helper" in it })
-        assertTrue(fake.commands.first().contains("--nice-name=bydmate_n9test"))
+        assertTrue(fake.commands.first().contains("--nice-name=${HelperBinderProtocol.PROCESS_NAME} "))
         assertTrue(fake.commands.first().contains(ctx.packageCodePath))
     }
 }
