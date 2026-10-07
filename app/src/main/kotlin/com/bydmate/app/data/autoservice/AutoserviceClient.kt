@@ -173,7 +173,9 @@ class AutoserviceClientImpl @Inject constructor(
     /**
      * `service call autoservice <tx> i32 <dev> i32 <fid>` produces stdout like:
      *   Result: Parcel(00000000 0000005b   '....[...')
-     * The 8-hex-digit token after "Parcel(00000000" is the 32-bit return value.
+     * Android 14 can insert whitespace after `Parcel(`. The first word is the
+     * exception status (must be zero); the second is the 32-bit return value.
+     * Require the complete scalar reply so truncated/malformed output stays null.
      */
     private fun parseParcelInt(raw: String): Int? {
         val match = PARCEL_REGEX.find(raw) ?: return null
@@ -182,6 +184,6 @@ class AutoserviceClientImpl @Inject constructor(
 
     private companion object {
         const val TAG = "AutoserviceClient"
-        val PARCEL_REGEX = Regex("""Parcel\(00000000\s+([0-9a-fA-F]{8})""")
+        val PARCEL_REGEX = Regex("""Parcel\(\s*00000000\s+([0-9a-fA-F]{8})(?:\s+'[^\r\n]*')?\s*\)""")
     }
 }

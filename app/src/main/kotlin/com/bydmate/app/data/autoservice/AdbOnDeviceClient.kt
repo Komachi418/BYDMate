@@ -2,6 +2,7 @@ package com.bydmate.app.data.autoservice
 
 import android.content.Context
 import android.util.Log
+import com.bydmate.app.BuildConfig
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -150,6 +151,7 @@ class AdbOnDeviceClientImpl @Inject constructor(
     }
 
     override suspend fun grantUsageStatsAppop(packageName: String): Boolean = withContext(Dispatchers.IO) {
+        if (BuildConfig.N9_READ_ONLY) return@withContext false
         // Only permit our own package — never grant appops to anything else.
         require(packageName.matches(PACKAGE_NAME_REGEX)) {
             "grantUsageStatsAppop: refused package $packageName"
@@ -168,6 +170,7 @@ class AdbOnDeviceClientImpl @Inject constructor(
     }
 
     override suspend fun grantWriteSecureSettings(packageName: String): Boolean = withContext(Dispatchers.IO) {
+        if (BuildConfig.N9_READ_ONLY) return@withContext false
         // Only permit our own package — never grant permissions to anything else.
         require(packageName.matches(PACKAGE_NAME_REGEX)) {
             "grantWriteSecureSettings: refused package $packageName"
@@ -304,7 +307,7 @@ class AdbOnDeviceClientImpl @Inject constructor(
         private val SPAWN_TOKEN_REGEX = Regex("""^[A-Za-z0-9]{16,64}$""")
 
         // Helper daemon — hardcoded so neither caller can inject paths/cmdlines.
-        private const val HELPER_PROCESS_NAME = "bydmate_helper"
-        private const val HELPER_LOG_PATH = "/data/local/tmp/bydmate_helper.log"
+        private val HELPER_PROCESS_NAME = com.bydmate.app.helper.HelperBinderProtocol.PROCESS_NAME
+        private val HELPER_LOG_PATH = com.bydmate.app.helper.HelperBinderProtocol.LOG_PATH
     }
 }

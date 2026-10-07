@@ -29,6 +29,7 @@ import java.util.concurrent.ConcurrentHashMap
 import android.os.IBinder
 import android.os.Looper
 import android.os.Parcel
+import android.os.UserHandle
 import java.io.File
 import java.io.RandomAccessFile
 import java.lang.reflect.InvocationTargetException
@@ -39,7 +40,7 @@ import java.nio.channels.OverlappingFileLockException
 import kotlin.system.exitProcess
 
 // Lock path on the device filesystem (writable by shell uid).
-private const val LOCK_PATH = "/data/local/tmp/bydmate_helper.lock"
+private val LOCK_PATH = HelperBinderProtocol.LOCK_PATH
 
 // SELinux domain of the running process; the daemon must land in the shell domain to be
 // allowed to addService. Unreadable on some firmwares — never fatal.
@@ -158,7 +159,7 @@ internal fun acquireSingleOwnerLock(path: String): Pair<FileChannel, FileLock>? 
  * plain reflection is fine here — do NOT use HiddenApiBypass in this file.
  */
 fun main(args: Array<String>) {
-    val expectedUid = args.getOrNull(0)?.toIntOrNull() ?: run {
+    val expectedUid = args.getOrNull(0)?.toIntOrNull()?.takeIf { it >= 0 } ?: run {
         System.err.println("ERR: usage: HelperDaemon <appUid>")
         // exitProcess (not return): app_process keeps the binder threadpool's
         // non-daemon threads alive, so a bare `return` from main() would hang the JVM.
@@ -188,6 +189,8 @@ fun main(args: Array<String>) {
     // daemon log is world-readable on the device. Only its presence is diagnostic.
     println(
         "BOOT uid=${android.os.Process.myUid()} pid=${android.os.Process.myPid()} " +
+            "appUid=$expectedUid appUserId=${expectedUid / 100_000} package=${HelperBinderProtocol.APP_PACKAGE} " +
+            "readOnly=${BuildConfig.N9_READ_ONLY} " +
             "selinux=${readSelinuxContext()} token=${if (spawnToken != null) "set" else "absent"}"
     )
     System.out.flush()
@@ -197,10 +200,12 @@ fun main(args: Array<String>) {
     @Suppress("DEPRECATION")
     Looper.prepareMainLooper()
     val systemContext: Context? = acquireSystemContext()
-    FidPushRegistry.context = systemContext?.let { PermissiveContext(it) }
-    // The diagnostic recorder builds its own device instances and needs the same Context.
-    FidRecorder.context = FidPushRegistry.context
-    logPushContext(systemContext)
+    if (!BuildConfig.N9_READ_ONLY) {
+        FidPushRegistry.context = systemContext?.let { PermissiveContext(it) }
+        // The diagnostic recorder builds its own device instances and needs the same Context.
+        FidRecorder.context = FidPushRegistry.context
+        logPushContext(systemContext)
+    }
 
     // Step 2: resolve autoservice Binder.
     val smCls = Class.forName("android.os.ServiceManager")
@@ -214,9 +219,11 @@ fun main(args: Array<String>) {
         }
     val autoIface: String = svc.interfaceDescriptor ?: ""
     // The power-off report seeds its listener with a direct getInt of the power fids.
-    OffReport.reader = { dev, fid ->
-        autoserviceTransact(svc, autoIface, 5, dev, fid, 0, writeValue = false)
-            .takeIf { (status, _) -> status == 0 }?.second
+    if (!BuildConfig.N9_READ_ONLY) {
+        OffReport.reader = { dev, fid ->
+            autoserviceTransact(svc, autoIface, 5, dev, fid, 0, writeValue = false)
+                .takeIf { (status, _) -> status == 0 }?.second
+        }
     }
 
     // Keeps created VirtualDisplays alive (their backing Surface comes from the app overlay).
@@ -237,6 +244,8 @@ fun main(args: Array<String>) {
             if (code == IBinder.INTERFACE_TRANSACTION) return super.onTransact(code, data, reply, flags)
 
             data.enforceInterface(HelperBinderProtocol.DESCRIPTOR)
+
+            if (!helperTransactionAllowed(code, BuildConfig.N9_READ_ONLY)) return false
 
             return when (code) {
                 HelperBinderProtocol.TX_PING -> runCatching {
@@ -932,12 +941,12 @@ fun main(args: Array<String>) {
                 exitProcess(4)
             }
             RegistrationFallback.BROADCAST -> try {
-                publishBinderByBroadcast(systemContext!!, helperBinder, spawnToken!!)
+                publishBinderByBroadcast(systemContext!!, helperBinder, spawnToken!!, expectedUid)
                 transport = HelperBinderHolder.TRANSPORT_BROADCAST
                 // One delivery is not enough: the app process is recreated (service restart, task
                 // removed, memory pressure) far more often than the daemon, and a recreated process
                 // has no binder. Keep announcing until a client registers (#64/#148).
-                scheduleReannounce(systemContext!!, helperBinder, spawnToken!!)
+                scheduleReannounce(systemContext!!, helperBinder, spawnToken!!, expectedUid)
             } catch (be: Exception) {
                 System.err.println("ERR: broadcast ${describeBootstrapFailure(be)}")
                 exitProcess(5)
@@ -945,7 +954,7 @@ fun main(args: Array<String>) {
         }
     }
 
-    System.out.println("READY via=$transport pid=${android.os.Process.myPid()}")
+    System.out.println("READY via=$transport pid=${android.os.Process.myPid()} appUserId=${expectedUid / 100_000}")
     System.out.flush()
 
     // Keepalive: Looper.loop() blocks this thread indefinitely so main() never returns
@@ -994,12 +1003,16 @@ internal fun decideRegistrationFallback(hasSystemContext: Boolean, hasToken: Boo
  * FLAG_INCLUDE_STOPPED_PACKAGES so a force-stopped app (the state right after an update) is still
  * woken. The token lets the app authenticate the sender; version and pid are diagnostics for the dump.
  */
-private fun publishBinderByBroadcast(
+// This runs as the existing shell UID, whose platform grants include cross-user broadcasts.
+@android.annotation.SuppressLint("MissingPermission")
+internal fun publishBinderByBroadcast(
     ctx: Context,
     binder: IBinder,
     token: String,
+    expectedUid: Int,
     includeStopped: Boolean = true,
 ) {
+    require(expectedUid >= 0) { "Invalid app UID" }
     val extras = Bundle().apply {
         putBinder(HelperBinderProtocol.KEY_BINDER, binder)
         putString(HelperBinderProtocol.KEY_TOKEN, token)
@@ -1011,7 +1024,10 @@ private fun publishBinderByBroadcast(
         .setPackage(HelperBinderProtocol.APP_PACKAGE)
         .addFlags(binderIntentFlags(includeStopped))
         .putExtra(HelperBinderProtocol.EXTRA_BUNDLE, extras)
-    ctx.sendBroadcast(intent)
+    // systemContext belongs to the shell process (user 0), not necessarily the app. N9 runs
+    // the app as user 10. Send only to the user encoded in its already authenticated full UID;
+    // never use ALL/CURRENT or fall back to user 0 after a platform permission denial.
+    ctx.sendBroadcastAsUser(intent, UserHandle.getUserHandleForUid(expectedUid))
 }
 
 /** App-side binder registered over TX_REGISTER_CLIENT; null while no app process holds ours. */
@@ -1035,7 +1051,7 @@ internal fun shouldReannounce(transport: String, clientRegistered: Boolean): Boo
  * registered. Uncapped on purpose: one explicit intent per 10 s costs nothing, and it is
  * self-limiting — a running app registers within seconds of receiving the binder.
  */
-private fun scheduleReannounce(ctx: Context, binder: IBinder, token: String) {
+internal fun scheduleReannounce(ctx: Context, binder: IBinder, token: String, expectedUid: Int) {
     val handler = android.os.Handler(Looper.getMainLooper())
     val tick = object : Runnable {
         override fun run() {
@@ -1043,9 +1059,10 @@ private fun scheduleReannounce(ctx: Context, binder: IBinder, token: String) {
             // includeStopped = false: the user force-stopping the app kills our client binder and
             // resumes this timer — waking the app back up would override that stop. A process
             // restarted normally still receives it.
-            runCatching { publishBinderByBroadcast(ctx, binder, token, includeStopped = false) }
+            runCatching { publishBinderByBroadcast(ctx, binder, token, expectedUid, includeStopped = false) }
+                .onFailure { System.err.println("ERR: reannounce appUserId=${expectedUid / 100_000} ${describeBootstrapFailure(it)}") }
             reannounceCount++
-            println("REANNOUNCE n=$reannounceCount")
+            println("REANNOUNCE n=$reannounceCount appUserId=${expectedUid / 100_000}")
             System.out.flush()
             handler.postDelayed(this, REANNOUNCE_INTERVAL_MS)
         }
@@ -1120,6 +1137,7 @@ private fun autoserviceTransact(
     value: Int,
     writeValue: Boolean
 ): Pair<Int, Int> {
+    if (!helperAutoserviceAllowed(tx, writeValue, BuildConfig.N9_READ_ONLY)) return -1 to 0
     val data2 = Parcel.obtain()
     val reply2 = Parcel.obtain()
     return try {

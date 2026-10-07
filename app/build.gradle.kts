@@ -32,6 +32,7 @@ android {
         targetSdk = 29
         versionCode = 503
         versionName = "3.19.9"
+        buildConfigField("boolean", "N9_READ_ONLY", "false")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -50,6 +51,13 @@ android {
     }
 
     buildTypes {
+        create("n9Test") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".n9test"
+            versionNameSuffix = "-n9-readonly"
+            buildConfigField("boolean", "N9_READ_ONLY", "true")
+            matchingFallbacks += listOf("debug")
+        }
         release {
             signingConfig = signingConfigs.findByName("release")
             isMinifyEnabled = true

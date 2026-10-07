@@ -1,6 +1,30 @@
 package com.bydmate.app.helper
 
 import android.os.IBinder
+import com.bydmate.app.BuildConfig
+import com.bydmate.app.data.autoservice.FidRegistry
+
+/** Keep the official daemon's identity stable; a parallel APK owns separate shell resources. */
+internal fun helperRuntimeName(applicationId: String): String = when (applicationId) {
+    "com.bydmate.app" -> "bydmate_helper"
+    "com.bydmate.app.n9test" -> "bydmate_n9test"
+    // Linux comm is limited to 15 characters. Never truncate a package name to a shared prefix.
+    else -> "byd_" + Integer.toUnsignedString(applicationId.hashCode(), 16)
+}
+
+/** The N9 build exposes only battery reads and the minimum Binder lifecycle operations. */
+internal fun helperTransactionAllowed(code: Int, readOnly: Boolean): Boolean = !readOnly || when (code) {
+    HelperBinderProtocol.TX_PING,
+    HelperBinderProtocol.TX_READ,
+    HelperBinderProtocol.TX_READ_BATCH,
+    HelperBinderProtocol.TX_GET_VERSION,
+    HelperBinderProtocol.TX_REGISTER_CLIENT -> true
+    else -> false
+}
+
+/** A caller cannot smuggle an autoservice setter through the generic READ operation. */
+internal fun helperAutoserviceAllowed(tx: Int, writeValue: Boolean, readOnly: Boolean): Boolean =
+    !readOnly || (!writeValue && (tx == FidRegistry.TX_GET_INT || tx == FidRegistry.TX_GET_FLOAT))
 
 /**
  * Wire contract shared by the in-app binder client (HelperClientImpl) and the
@@ -71,8 +95,10 @@ import android.os.IBinder
  * status/value carry the raw autoservice transact result (see HelperDaemon).
  */
 object HelperBinderProtocol {
-    const val SERVICE_NAME = "bydmate_helper"
-    const val PROCESS_NAME = "bydmate_helper"   // app_process --nice-name + ps lookup
+    val SERVICE_NAME = helperRuntimeName(BuildConfig.APPLICATION_ID)
+    val PROCESS_NAME = SERVICE_NAME   // app_process --nice-name + ps lookup
+    val LOG_PATH = "/data/local/tmp/$PROCESS_NAME.log"
+    val LOCK_PATH = "/data/local/tmp/$PROCESS_NAME.lock"
     const val DESCRIPTOR = "com.bydmate.app.helper.IHelper"
 
     /**
@@ -86,7 +112,7 @@ object HelperBinderProtocol {
      * THIS spawn, the binder's interface descriptor, and — afterwards — the version the daemon
      * reports over TX_GET_VERSION.
      */
-    const val ACTION_BINDER = "com.bydmate.app.helper.BINDER"
+    const val ACTION_BINDER = BuildConfig.APPLICATION_ID + ".helper.BINDER"
     const val RECEIVER_CLASS = "com.bydmate.app.helper.HelperBinderReceiver"
 
     /** Extras of [ACTION_BINDER]: one Bundle (a Binder cannot be an Intent extra directly). */
@@ -561,7 +587,7 @@ object HelperBinderProtocol {
     const val PANE_TYPE_RECENTS = 3
 
     /** Our own package — target of the narrow grantOverlayPermission appops call. */
-    const val APP_PACKAGE = "com.bydmate.app"
+    const val APP_PACKAGE = BuildConfig.APPLICATION_ID
 
     /**
      * Flattened ComponentName of our steering-wheel accessibility service — appended

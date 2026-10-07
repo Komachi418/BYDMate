@@ -54,6 +54,83 @@ class AutoserviceClientImplTest {
     }
 
     @Test
+    fun `N9 Android 14 original replies decode SoH lifetime energy and SOC`() = runTest {
+        // Exact Result substrings (including literal tabs) from lines 427-429 of
+        // bydmate_logs_20261007_185755.txt, SHA-256:
+        // bbe03154e7267ad9b60e41d4a34e6c215344c270d4de6adfb0fa443fcfc5cfd4
+        // Keep only these scalar replies in the fixture, not the private diagnostic log.
+        val samples = checkNotNull(javaClass.getResource("/autoservice/n9-android14-parcels.txt"))
+            .readText().lines().filter { it.isNotEmpty() }
+        assertEquals(3, samples.size)
+        assertTrue(samples.all { it.startsWith("Result: Parcel(\t") })
+        val commands = listOf(
+            "service call autoservice 5 i32 1014 i32 1145045032",
+            "service call autoservice 7 i32 1014 i32 1032871984",
+            "service call autoservice 7 i32 1014 i32 1246777400"
+        )
+        val adb = FakeAdb(responses = commands.zip(samples).toMap())
+        val client = AutoserviceClientImpl(adb)
+
+        assertEquals(100, client.getInt(1014, 1145045032))
+        assertEquals(209.600006f, client.getFloat(1014, 1032871984)!!, 0.000001f)
+        assertEquals(99.0f, client.getFloat(1014, 1246777400)!!, 0.0f)
+        assertEquals(commands, adb.calls)
+        assertTrue(client.isAvailable())
+    }
+
+    @Test
+    fun `scalar replies accept spaces tabs and line breaks before exception word`() = runTest {
+        val cmd = "service call autoservice 5 i32 1014 i32 1145045032"
+        for (whitespace in listOf("", " ", "\t", " \t ", "\r\n\t")) {
+            val raw = "Result: Parcel(${whitespace}00000000\t00000064   '....d...')\r\n"
+            val client = AutoserviceClientImpl(FakeAdb(mapOf(cmd to raw)))
+            assertEquals("whitespace=$whitespace", 100, client.getInt(1014, 1145045032))
+        }
+    }
+
+    @Test
+    fun `scalar replies reject exceptions malformed words and truncated output`() = runTest {
+        val intCmd = "service call autoservice 5 i32 1014 i32 1145045032"
+        val floatCmd = "service call autoservice 7 i32 1014 i32 1246777400"
+        val invalid = listOf(
+            "Result: Parcel(\tfffffffe 00000064   '........')",
+            "Result: Parcel(\t00000001 00000064   '........')",
+            "Result: Parcel(\t000000000 00000064   '........')",
+            "Result: Parcel(\t00000000 0000064   '........')",
+            "Result: Parcel(\t00000000 000000640   '........')",
+            "Result: Parcel(\t00000000 0000006g   '........')",
+            "Result: Parcel(\t00000000)",
+            "Result: Parcel(\t00000000 00000064",
+            "Result: Parcel(\t00000000 00000064   '....d...'",
+            "Result: Parcel(\t00000000 00000064   '....d...)",
+            "Result: Parcel(\t00000000 00000064garbage)",
+            "service: Service autoservice does not exist"
+        )
+        for (raw in invalid) {
+            val client = AutoserviceClientImpl(FakeAdb(mapOf(intCmd to raw, floatCmd to raw)))
+            assertNull(raw, client.getInt(1014, 1145045032))
+            assertNull(raw, client.getFloat(1014, 1246777400))
+        }
+    }
+
+    @Test
+    fun `Android 14 whitespace keeps sentinel decoding and raw access unchanged`() = runTest {
+        val intCmd = "service call autoservice 5 i32 1014 i32 1145045032"
+        for (sentinel in listOf(0xFFFF, 0xFFFFF, -10013, -10011)) {
+            val raw = parcelInt(sentinel).replace("Parcel(", "Parcel(\t")
+            val client = AutoserviceClientImpl(FakeAdb(mapOf(intCmd to raw)))
+            assertNull(client.getInt(1014, 1145045032))
+            assertEquals(sentinel, client.getIntRaw(1014, 1145045032))
+        }
+        val floatCmd = "service call autoservice 7 i32 1014 i32 1246777400"
+        for (bits in listOf(0xBF800000.toInt(), 0x7FC00000, 0x7F800000, 0xFF800000.toInt())) {
+            val raw = parcelFloat(bits).replace("Parcel(", "Parcel( \t")
+            val client = AutoserviceClientImpl(FakeAdb(mapOf(floatCmd to raw)))
+            assertNull(client.getFloat(1014, 1246777400))
+        }
+    }
+
+    @Test
     fun `getInt returns null when ADB returns sentinel 0xFFFF`() = runTest {
         val cmd = "service call autoservice 5 i32 1014 i32 99999"
         val adb = FakeAdb(responses = mapOf(cmd to parcelInt(0xFFFF)))
